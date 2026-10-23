@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telemetry & Anomaly Reconstruction Engine</title>
+    <link rel="stylesheet" href="/vendor/leaflet.css" />
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+    <header>
+        <div class="brand">
+            <div class="brand-icon">⚡</div>
+            <div class="brand-title">
+                <h1>TELEMETRY & ANOMALY RECONSTRUCTION ENGINE</h1>
+                <p>Edge classifier • Circular queue black box • Incident linked list • Instant localization</p>
+            </div>
+        </div>
+        <div class="header-status">
+            <span class="badge badge-c">VEHICLE: MH-12-DS-2026</span>
+            <span class="badge badge-c">BACKEND: C99 / POSIX</span>
+            <span id="status-latency" class="badge badge-latency">EDGE LATENCY: -- µs</span>
+            <span id="status-stream" class="badge badge-latency">CONNECTING...</span>
+        </div>
+    </header>
+
+    <div class="container">
+
+        <!-- Emergency banner (shown by SSE 'alert' event) -->
+        <div id="emergency-banner" class="emergency-banner">
+            <div class="emergency-banner-content">
+                <div class="emergency-title">
+                    <span class="emergency-icon">🚨</span>
+                    <div class="emergency-info">
+                        <h3 id="emergency-title">CRITICAL ALERT DETECTED</h3>
+                        <p id="emergency-detail">--</p>
+                        <p id="emergency-capture" style="margin-top:4px;"></p>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <button id="btn-inspect-latest" class="btn btn-primary" onclick="window.App.openLatestIncident()">
+                        🔍 Inspect Black Box
+                    </button>
+                    <button class="btn btn-secondary" onclick="window.App.dismissBanner()">
+                        ✖ Dismiss
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Simulation controls -->
+        <div class="sim-controls-panel">
+            <span class="sim-label">⚡ Inject scenario:</span>
+            <button class="btn btn-danger" onclick="window.triggerScenario('collision')" title="~14 G frontal impact at ~50 km/h">
+                🚨 Severe Collision
+            </button>
+            <button class="btn btn-danger" onclick="window.triggerScenario('rollover')" title="Roll angle passes 50°">
+                🔄 Rollover
+            </button>
+            <button class="btn btn-warning" onclick="window.triggerScenario('brake')" title="-0.92 G deceleration">
+                🛑 Harsh Braking
+            </button>
+            <button class="btn btn-warning" onclick="window.triggerScenario('overheat')" title="Coolant rises past 115 °C">
+                🔥 Engine Overheat
+            </button>
+            <button class="btn btn-secondary" onclick="window.triggerScenario('normal')">
+                🟢 Resume Normal Driving
+            </button>
+            <button class="btn btn-secondary" onclick="window.resetSystem()">
+                🔄 Reset (clear all data)
+            </button>
+            <button id="btn-siren-toggle" class="btn btn-secondary" onclick="window.toggleSiren()">
+                🔊 Siren: ON
+            </button>
+            <span id="scenario-indicator" class="badge badge-c" style="margin-left:auto;">SCENARIO: NORMAL</span>
+        </div>
+
+        <!-- KPIs -->
+        <div class="kpi-grid">
+            <div class="kpi-card">
+                <div class="kpi-header"><span>Vehicle Speed</span><span>KM/H</span></div>
+                <div class="kpi-value-row"><div id="kpi-speed" class="kpi-value">0</div><span class="kpi-unit">km/h</span></div>
+                <div id="kpi-total-pkts" class="kpi-subtext">0 packets processed</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-header"><span>Total G-Force</span><span>MAGNITUDE</span></div>
+                <div class="kpi-value-row"><div id="kpi-g" class="kpi-value">1.00</div><span class="kpi-unit">G</span></div>
+                <div class="kpi-subtext">√(ax² + ay² + az²) — crash threshold 4.0 G</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-header"><span>Engine Temperature</span><span>COOLANT</span></div>
+                <div class="kpi-value-row"><div id="kpi-temp" class="kpi-value">90</div><span class="kpi-unit">°C</span></div>
+                <div class="kpi-subtext">Overheat threshold 115 °C</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-header"><span>Anomaly Score</span><span>EDGE CLASSIFIER</span></div>
+                <div class="kpi-value-row"><div id="kpi-score" class="kpi-value">0%</div></div>
+                <div id="kpi-class" class="kpi-subtext">Class: NORMAL</div>
+            </div>
+        </div>
+
+        <!-- Gauges + map -->
+        <div class="dashboard-grid">
+            <div class="card">
+                <div class="card-title">
+                    <h2>🏎️ Vehicle Dynamics</h2>
+                    <span class="tag">struct TelemetryPacket @ 20 Hz</span>
+                </div>
+                <div class="gauges-container">
+                    <div class="gauge-box">
+                        <canvas id="gauge-speed" class="gauge-canvas" width="160" height="160"></canvas>
+                        <span class="gauge-label">Speedometer</span>
+                    </div>
+                    <div class="gauge-box">
+                        <canvas id="gauge-rpm" class="gauge-canvas" width="160" height="160"></canvas>
+                        <span class="gauge-label">Tachometer</span>
+                    </div>
+                    <div class="gauge-box">
+                        <canvas id="gauge-g" class="gauge-canvas" width="160" height="160"></canvas>
+                        <span class="gauge-label">G-Force (ax / ay)</span>
+                    </div>
+                </div>
+                <div class="attitude-row">
+                    <div>Roll: <strong id="attitude-roll">0.0°</strong></div>
+                    <div>Pitch: <strong id="attitude-pitch">0.0°</strong></div>
+                    <div>Heading: <strong id="attitude-yaw">0°</strong></div>
+                    <div>Brake: <strong id="attitude-brake">0%</strong></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">
+                    <h2>📍 Instant Localization</h2>
+                    <span class="tag">Haversine distance in C</span>
+                </div>
+                <div style="position:relative;">
+                    <div id="gps-map"></div>
+                    <div id="map-offline" class="map-offline">Map tiles need internet — vehicle &amp; hospital positions are still live.</div>
+                </div>
+                <div class="map-hospital-card">
+                    <div>
+                        <div class="muted-label">Nearest emergency facility (live)</div>
+                        <div id="hud-hospital-name" class="hospital-name">Locating...</div>
+                        <div style="font-size: 0.72rem; color: #cbd5e1;">Hotline: <strong id="hud-hospital-phone">--</strong></div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div id="hud-hospital-dist" class="hospital-dist">-- km</div>
+                        <div id="hud-gps" style="font-size: 0.7rem; color: #94a3b8; font-family: var(--font-mono);">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Data structures -->
+        <div class="ds-section">
+            <div class="ds-grid">
+                <div class="card">
+                    <div class="card-title">
+                        <h2>🔄 Circular Queue (Ring Buffer)</h2>
+                        <span class="tag">O(1) enqueue • 100 slots = 5 s</span>
+                    </div>
+                    <div class="cq-visualizer-box">
+                        <div class="cq-canvas-container">
+                            <canvas id="cq-canvas" width="260" height="260"></canvas>
+                            <div class="cq-center-info">
+                                <div class="cq-title">PACKETS</div>
+                                <div id="cq-center-count" class="cq-count">0</div>
+                                <div id="cq-status-text" class="cq-status">ACTIVE</div>
+                            </div>
+                        </div>
+                        <div class="cq-meta-pills">
+                            <div class="cq-pill">head: <span id="cq-head-val">0</span></div>
+                            <div class="cq-pill">tail: <span id="cq-tail-val">0</span></div>
+                            <div class="cq-pill">count: <span id="cq-count-val">0 / 100</span></div>
+                            <div class="cq-pill">RAM: <span id="cq-ram-val">--</span></div>
+                        </div>
+                        <div class="cq-legend">
+                            <span><i style="background:#00f2fe"></i>head (next write)</span>
+                            <span><i style="background:#f59e0b"></i>tail (oldest)</span>
+                            <span><i style="background:rgba(56,189,248,0.35)"></i>filled</span>
+                            <span><i style="background:#ef4444"></i>frozen</span>
+                        </div>
+                        <div class="explain">
+                            When full, each new packet overwrites the oldest one:
+                            <code>head = (head + 1) % capacity</code>. On a crash the engine records
+                            20 more packets, then <b>freezes</b> the buffer so the pre-crash history cannot be overwritten.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">
+                        <h2>🔗 Incident Linked List</h2>
+                        <span id="ll-count-badge" class="tag">0 nodes</span>
+                    </div>
+                    <div class="ll-headtail"><span>head →</span><span>← tail</span></div>
+                    <div id="ll-container" class="ll-container">
+                        <div class="ll-empty">No incidents yet. Inject a scenario above.</div>
+                    </div>
+                    <div class="explain" style="margin-top: 12px;">
+                        Each incident is a heap-allocated <code>IncidentNode</code> with <code>prev</code>/<code>next</code>
+                        pointers, appended at the tail in O(1). Each node is also appended to
+                        <code>data/blackbox.bin</code> and the list is rebuilt from that file on restart.
+                        <span id="ll-mem"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Event log -->
+        <div class="card">
+            <div class="card-title">
+                <h2>🧾 Edge Event Log</h2>
+                <span class="tag">what the C engine just did</span>
+            </div>
+            <div id="event-log" class="event-log"></div>
+        </div>
+    </div>
+
+    <!-- Crash reconstruction modal -->
+    <div id="modal-reconstruct" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h3 id="recon-title">Crash Reconstruction</h3>
+                    <p id="recon-desc" class="recon-sub"></p>
+                    <p id="recon-hospital" class="recon-sub2"></p>
+                </div>
+                <button class="btn-close" onclick="window.CrashReconstruction.close()">&times;</button>
+            </div>
+
+            <div class="scrubber-container">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <span style="font-size: 0.8rem; font-weight: 700; color: #38bdf8;">⏱️ Frame scrubber (data copied from the frozen ring buffer)</span>
+                    <span id="scrubber-time-offset" style="font-size: 0.75rem; font-family: var(--font-mono); color: #00f2fe;">T = 0.00 s</span>
+                </div>
+                <input id="scrubber-slider" type="range" min="0" max="99" value="0" class="scrubber-slider">
+                <div class="scrubber-labels">
+                    <span id="scrub-label-start">oldest</span>
+                    <span id="scrub-label-mid">T0 = detection</span>
+                    <span id="scrub-label-end">newest</span>
+                </div>
+            </div>
+
+            <div class="reconstruct-chart-box">
+                <canvas id="reconstruct-chart"></canvas>
+                <div id="chart-missing" class="map-offline" style="display:none;">Chart library failed to load.</div>
+            </div>
+
+            <div class="telemetry-snapshot-grid">
+                <div class="snap-card"><div class="snap-label">Frame</div><div id="snap-idx" class="snap-val">#0</div></div>
+                <div class="snap-card"><div class="snap-label">Speed</div><div id="snap-speed" class="snap-val">--</div></div>
+                <div class="snap-card"><div class="snap-label">RPM</div><div id="snap-rpm" class="snap-val">--</div></div>
+                <div class="snap-card"><div class="snap-label">Total G</div><div id="snap-g" class="snap-val" style="color:#ef4444;">--</div></div>
+                <div class="snap-card"><div class="snap-label">ax (long.)</div><div id="snap-ax" class="snap-val">--</div></div>
+                <div class="snap-card"><div class="snap-label">ay (lat.)</div><div id="snap-ay" class="snap-val">--</div></div>
+                <div class="snap-card"><div class="snap-label">Roll</div><div id="snap-roll" class="snap-val">--</div></div>
+                <div class="snap-card"><div class="snap-label">Pitch</div><div id="snap-pitch" class="snap-val">--</div></div>
+                <div class="snap-card"><div class="snap-label">Engine temp</div><div id="snap-temp" class="snap-val">--</div></div>
+                <div class="snap-card"><div class="snap-label">Score</div><div id="snap-score" class="snap-val">--</div></div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;">
+                <button class="btn btn-secondary" onclick="window.CrashReconstruction.exportJSON()">💾 Export JSON</button>
+                <button class="btn btn-primary" onclick="window.CrashReconstruction.printReport()">🖨️ Print Report</button>
+                <button class="btn btn-secondary" onclick="window.CrashReconstruction.close()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/vendor/leaflet.js"></script>
+    <script src="/vendor/chart.umd.min.js"></script>
+    <script src="/js/gauges.js"></script>
+    <script src="/js/ds_visualizer.js"></script>
+    <script src="/js/crash_reconstruction.js"></script>
+    <script src="/js/app.js"></script>
+</body>
+</html>
